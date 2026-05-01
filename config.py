@@ -41,7 +41,7 @@ _config = {
     "NYXSTRIKE_LLM_API_KEY":  "",                               # openai/anthropic; ollama.com also accepts OLLAMA_API_KEY
     "NYXSTRIKE_LLM_TIMEOUT":  600,                              # seconds
     "NYXSTRIKE_LLM_MAX_LOOPS": 9,
-    "NYXSTRIKE_LLM_THINK":    False,                            # Enable model thinking/reasoning (Ollama only, e.g. Qwen3)
+    "NYXSTRIKE_LLM_THINK":    True,                             # Enable model thinking/reasoning (Ollama only, e.g. Qwen3)
     "NYXSTRIKE_LLM_NUM_CTX":  4096,                             # Context window size for chat (Ollama only)
     "NYXSTRIKE_LLM_NUM_CTX_ANALYSE": 16384,                     # Context window size for AI Analyse / AI Report (Ollama only)
 

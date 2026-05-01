@@ -337,6 +337,11 @@ def _stream_llm_with_tools(
     yield "data: [THINKING]\n\n"
     for chunk in llm_client.stream_chat(llm_messages):
       if isinstance(chunk, dict):
+        # Thinking token chunk (Ollama reasoning tokens when think=true)
+        if chunk.get("type") == "thinking":
+          yield f"data: [THINK_TOKEN] {json.dumps(chunk.get('content', ''))}\n\n"
+          continue
+        # Final stats (eval_count, tokens_per_sec, etc.)
         response_stats = chunk
         yield f"data: [STATS] {json.dumps(chunk)}\n\n"
         continue

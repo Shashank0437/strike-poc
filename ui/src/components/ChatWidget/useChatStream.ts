@@ -36,6 +36,8 @@ export interface ChatMessage {
   content: string
   streaming?: boolean
   thinking?: boolean
+  /** Accumulated reasoning tokens from the model (when think mode is enabled). */
+  thinkingContent?: string
   error?: boolean
   stats?: ChatStats
   timestamp?: string
@@ -170,6 +172,18 @@ export function useChatStream(chatSessionId: string | null) {
           continue
         }
 
+        if (payload.startsWith('[THINK_TOKEN]')) {
+          try {
+            const token = JSON.parse(payload.slice(13).trim()) as string
+            setMessages(prev => prev.map(m =>
+              m.id === assistantMsgId
+                ? { ...m, thinking: true, thinkingContent: (m.thinkingContent || '') + token }
+                : m
+            ))
+          } catch { /* malformed, skip */ }
+          continue
+        }
+
         if (payload.startsWith('[STATS]')) {
           try {
             const stats = JSON.parse(payload.slice(7).trim()) as ChatStats
@@ -204,7 +218,7 @@ export function useChatStream(chatSessionId: string | null) {
           return 'tool_pending'
         }
 
-        // Parse JSON token — first real token clears thinking state
+        // Parse JSON token — first real token clears thinking state (but keeps thinkingContent)
         try {
           const token = JSON.parse(payload)
           setMessages(prev => prev.map(m =>

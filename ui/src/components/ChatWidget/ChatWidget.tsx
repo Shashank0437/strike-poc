@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { MessageSquare, ChevronLeft, ChevronRight, ArrowDown } from 'lucide-react'
 import { ChatSidebar } from './ChatSidebar'
 import { ChatMessageList } from './ChatMessageList'
@@ -9,24 +9,12 @@ import type { ChatMessage } from './useChatStream'
 import './ChatWidget.css'
 
 const OPEN_KEY = 'nyxstrike_chat_open'
-const SIZE_KEY = 'nyxstrike_chat_size'
-const MIN_W = 280
-const MIN_H = 350
 
 function loadOpen(): boolean {
   try { return localStorage.getItem(OPEN_KEY) === '1' } catch { return false }
 }
 function saveOpen(v: boolean) {
   try { localStorage.setItem(OPEN_KEY, v ? '1' : '0') } catch {}
-}
-function loadSize(): { w: number; h: number } {
-  try {
-    const s = JSON.parse(localStorage.getItem(SIZE_KEY) || '{}')
-    return { w: Number(s.w) || 460, h: Number(s.h) || 520 }
-  } catch { return { w: 460, h: 520 } }
-}
-function saveSize(w: number, h: number) {
-  try { localStorage.setItem(SIZE_KEY, JSON.stringify({ w, h })) } catch {}
 }
 
 interface ChatWidgetProps {
@@ -37,8 +25,7 @@ interface ChatWidgetProps {
 
 export function ChatWidget({ llmAvailable, currentPage, currentSessionId }: ChatWidgetProps) {
   const [open, setOpen] = useState(loadOpen)
-  const [size, setSize] = useState(loadSize)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [prefill, setPrefill] = useState<string>('')
 
@@ -132,32 +119,6 @@ export function ChatWidget({ llmAvailable, currentPage, currentSessionId }: Chat
     }
   }
 
-  // Resize drag (top edge and left edge)
-  const dragRef = useRef<{ edge: 'top' | 'left'; startX: number; startY: number; startW: number; startH: number } | null>(null)
-
-  const onMouseDown = useCallback((edge: 'top' | 'left') => (e: React.MouseEvent) => {
-    e.preventDefault()
-    dragRef.current = { edge, startX: e.clientX, startY: e.clientY, startW: size.w, startH: size.h }
-  }, [size])
-
-  useEffect(() => {
-    function onMove(e: MouseEvent) {
-      const d = dragRef.current
-      if (!d) return
-      let { w, h } = { w: d.startW, h: d.startH }
-      if (d.edge === 'top') {
-        h = Math.max(MIN_H, d.startH + (d.startY - e.clientY))
-      } else {
-        w = Math.max(MIN_W, d.startW + (d.startX - e.clientX))
-      }
-      setSize({ w, h })
-      saveSize(w, h)
-    }
-    function onUp() { dragRef.current = null }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
-  }, [])
 
   function toggleOpen() {
     setOpen(prev => { saveOpen(!prev); return !prev })
@@ -175,24 +136,16 @@ export function ChatWidget({ llmAvailable, currentPage, currentSessionId }: Chat
         <button
           className="chat-fab"
           onClick={toggleOpen}
-          title="Open chat (Ctrl+Shift+C)"
-          aria-label="Open NyxStrike chat"
+          title="Open AI Assistant (Ctrl+Shift+C)"
+          aria-label="Open NyxStrike AI Assistant"
         >
-          <MessageSquare size={14} />
-          AI Assistant
+          <MessageSquare />
         </button>
       )}
 
       {/* Widget */}
       {open && (
-        <div
-          ref={widgetRef}
-          className="chat-widget"
-          style={{ width: size.w, height: size.h }}
-        >
-          {/* Resize handles */}
-          <div className="chat-resize-top" onMouseDown={onMouseDown('top')} />
-          <div className="chat-resize-left" onMouseDown={onMouseDown('left')} />
+        <div ref={widgetRef} className="chat-widget">
 
           <div className="chat-layout">
             {/* Sidebar */}
@@ -226,8 +179,8 @@ export function ChatWidget({ llmAvailable, currentPage, currentSessionId }: Chat
                   )}
                   <span className="chat-session-label mono">{sessionLabel}</span>
                 </div>
-                <button className="chat-close-btn" onClick={toggleOpen} title="Close">
-                  <ArrowDown size={14} />
+                <button className="chat-close-btn" onClick={toggleOpen} title="Close chat (Ctrl+Shift+C)">
+                  <ArrowDown size={16} />
                 </button>
               </div>
 
@@ -239,14 +192,16 @@ export function ChatWidget({ llmAvailable, currentPage, currentSessionId }: Chat
                 onSuggest={setPrefill}
               />
 
-              {/* Input */}
-              <ChatInput
-                onSend={handleSend}
-                streaming={streaming}
-                onStop={stop}
-                disabled={!activeSessionId}
-                prefill={prefill}
-              />
+              {/* Input wrapper for centering */}
+              <div className="chat-input-wrapper">
+                <ChatInput
+                  onSend={handleSend}
+                  streaming={streaming}
+                  onStop={stop}
+                  disabled={!activeSessionId}
+                  prefill={prefill}
+                />
+              </div>
             </div>
           </div>
         </div>

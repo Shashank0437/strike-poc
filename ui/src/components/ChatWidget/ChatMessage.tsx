@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Copy, Check, Terminal, ShieldAlert, CheckCircle, XCircle, Ban } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Copy, Check, Terminal, ShieldAlert, CheckCircle, XCircle, Ban, Brain, ChevronDown, ChevronUp } from 'lucide-react'
 import { renderMarkdown } from './renderMarkdown'
 import type { ChatMessage, ToolCallResolved } from './useChatStream'
 
@@ -145,6 +145,43 @@ function ToolCallCard({ message, onConfirmTool }: { message: ChatMessage; onConf
   )
 }
 
+function ThinkingBlock({ content, streaming }: { content: string; streaming: boolean }) {
+  // Expanded by default while streaming so user can watch the model think;
+  // auto-collapsed once the final answer starts arriving.
+  const [expanded, setExpanded] = useState(true)
+  const [userToggled, setUserToggled] = useState(false)
+
+  // Auto-collapse when the reasoning phase finishes (unless the user manually toggled).
+  useEffect(() => {
+    if (!streaming && !userToggled) {
+      setExpanded(false)
+    }
+  }, [streaming, userToggled])
+
+  function toggle() {
+    setUserToggled(true)
+    setExpanded(e => !e)
+  }
+
+  return (
+    <div className={`chat-thinking-block${expanded ? ' chat-thinking-block--expanded' : ''}${streaming ? ' chat-thinking-block--streaming' : ''}`}>
+      <button className="chat-thinking-header" onClick={toggle} type="button">
+        <Brain size={14} className="chat-thinking-icon" />
+        <span className="chat-thinking-label">
+          {streaming ? 'Thinking…' : 'Thought process'}
+        </span>
+        {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+      </button>
+      {expanded && (
+        <div className="chat-thinking-content">
+          {content}
+          {streaming && <span className="chat-thinking-cursor">▊</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ChatMessageBubble({ message, onRetry, onConfirmTool }: ChatMessageProps) {
   const isUser = message.role === 'user'
   const [copied, setCopied] = useState(false)
@@ -156,6 +193,9 @@ export function ChatMessageBubble({ message, onRetry, onConfirmTool }: ChatMessa
     })
   }
 
+  const hasThinkingContent = !!message.thinkingContent && message.thinkingContent.trim().length > 0
+  const isWaitingForFirstToken = (message.thinking || message.streaming) && message.content === '' && !hasThinkingContent
+
   return (
     <div className={`chat-message chat-message--${isUser ? 'user' : 'assistant'}${message.error ? ' chat-message--error' : ''}`}>
       <div className={`chat-message-bubble${(message.toolCallPending || message.toolCallResolved) ? ' chat-message-bubble--tool' : ''}`}>
@@ -163,18 +203,25 @@ export function ChatMessageBubble({ message, onRetry, onConfirmTool }: ChatMessa
           <ToolCallCard message={message} onConfirmTool={onConfirmTool} />
         ) : message.toolCallResolved ? (
           <ToolCallResolvedCard tc={message.toolCallResolved} />
-        ) : message.thinking && message.content === '' ? (
-          <span className="chat-thinking-indicator">Thinking…</span>
-        ) : message.streaming && message.content === '' ? (
-          <span className="chat-typing-indicator">
-            <span /><span /><span />
-          </span>
-        ) : isUser ? (
-          <span className="chat-message-text">{message.content}</span>
         ) : (
-          <div className="chat-message-markdown">
-            {renderMarkdown(message.content)}
-          </div>
+          <>
+            {/* Thinking/reasoning block — visible when the model is reasoning */}
+            {hasThinkingContent && (
+              <ThinkingBlock
+                content={message.thinkingContent || ''}
+                streaming={!!message.thinking}
+              />
+            )}
+            {isWaitingForFirstToken ? (
+              <span className="chat-thinking-indicator">Thinking…</span>
+            ) : isUser ? (
+              <span className="chat-message-text">{message.content}</span>
+            ) : message.content ? (
+              <div className="chat-message-markdown">
+                {renderMarkdown(message.content)}
+              </div>
+            ) : null}
+          </>
         )}
         {message.error && onRetry && (
           <button className="chat-retry-btn" onClick={onRetry}>Retry</button>

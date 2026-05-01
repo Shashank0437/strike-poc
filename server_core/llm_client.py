@@ -246,7 +246,12 @@ class OllamaBackend:
             data = json.loads(line)
           except json.JSONDecodeError:
             continue
-          chunk = data.get("message", {}).get("content", "")
+          msg = data.get("message", {})
+          # Ollama returns thinking tokens separately from content when think=true
+          thinking_chunk = msg.get("thinking", "")
+          if thinking_chunk:
+            yield {"type": "thinking", "content": thinking_chunk}
+          chunk = msg.get("content", "")
           if chunk:
             yield chunk
           if data.get("done"):

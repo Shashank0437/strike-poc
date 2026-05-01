@@ -30,6 +30,7 @@ export default defineConfig({
       '/api': 'http://127.0.0.1:8888',
       '/health': 'http://127.0.0.1:8888',
       '/ping': 'http://127.0.0.1:8888',
+      '/web-dashboard': 'http://127.0.0.1:8888',
     },
   },
 })
