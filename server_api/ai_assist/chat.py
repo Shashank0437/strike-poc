@@ -284,8 +284,11 @@ def _stream_llm_with_tools(
 
       # result is a dict: {"content": str, "tool_calls": list|None}
       tool_calls = result.get("tool_calls") if isinstance(result, dict) else None
-      content = result.get("content", "") if isinstance(result, dict) else str(result)
-      thinking_extra = (result.get("thinking_content") or "").strip() if isinstance(result, dict) else ""
+      _raw = result.get("content", "") if isinstance(result, dict) else result
+      content = _raw if isinstance(_raw, str) else ("" if _raw is None else str(_raw))
+      _think = result.get("thinking_content") if isinstance(result, dict) else None
+      # Gemini must use strings; ``or ""`` is unsafe if the API ever sends a truthy non-str (e.g. True).
+      thinking_extra = _think.strip() if isinstance(_think, str) else ""
 
       if thinking_extra:
         yield f"data: [THINK_TOKEN] {json.dumps(thinking_extra)}\n\n"

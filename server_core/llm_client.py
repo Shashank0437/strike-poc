@@ -344,7 +344,10 @@ class GeminiBackend:
       "Be concise and technical.\n\n" + conversation
     )
     r = self.chat([{"role": "user", "content": summary_prompt}], think=False)
-    return (r.get("content") or "").strip() if isinstance(r, dict) else str(r)
+    if isinstance(r, dict):
+      c = r.get("content")
+      return c.strip() if isinstance(c, str) else str(c or "").strip()
+    return str(r)
 
   def warm_up(self) -> None:
     try:
