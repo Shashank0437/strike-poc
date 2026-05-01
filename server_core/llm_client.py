@@ -36,8 +36,21 @@ logger = logging.getLogger(__name__)
 
 
 def _cfg(key: str, default: str = "") -> str:
-  """Read config: env var overrides config_core, which overrides default."""
-  return os.environ.get(key) or config_core.get(key, default)
+  """Read config as a string: env var overrides config_core, which overrides default.
+
+  ``config_core.get()`` can return arbitrary JSON-ish types (bool, int, None).
+  Callers here always want a string — coerce so downstream ``.strip()`` / ``.lower()``
+  never crash on e.g. ``True`` (``(True or '')`` stays ``True``).
+  """
+  env_val = os.environ.get(key)
+  if env_val is not None:
+    return env_val
+  raw = config_core.get(key, default)
+  if raw is None or raw is False:
+    return ""
+  if isinstance(raw, str):
+    return raw
+  return str(raw)
 
 
 # Legacy default URL from older setups — treat as «no OpenAI override»
@@ -181,8 +194,10 @@ class GeminiBackend:
   def _want_thoughts(self, think: Optional[bool]) -> bool:
     if think is not None:
       return bool(think)
-    v = (_cfg("NYXSTRIKE_LLM_THINK") or "").strip().lower()
-    return v in ("1", "true", "yes", "y")
+    raw = _cfg("NYXSTRIKE_LLM_THINK")
+    if isinstance(raw, bool):
+      return raw
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "y")
 
   def _apply_thinking_config(self, gen_cfg: Dict[str, Any], want: bool) -> None:
     if not want:
