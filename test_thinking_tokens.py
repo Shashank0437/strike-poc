@@ -12,7 +12,7 @@ import sys
 # Your Ollama API key
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "a6fe38c3983c4ba5b142dfba6528cef6.k18PBm0OvXKh1opZxYKUgrEN")
 OLLAMA_URL = "https://ollama.com/api/chat"
-MODEL = "nemotron-3-super:cloud"
+MODEL = "qwen3.5:397b-cloud"
 
 def test_thinking_tokens():
     """Test if thinking tokens are being returned by Ollama."""
