@@ -36,7 +36,7 @@ _config = {
 
     # ── LLM client ────────────────────────────────────────────────────────────
     "NYXSTRIKE_LLM_PROVIDER": "ollama",                         # ollama | openai | anthropic
-    "NYXSTRIKE_LLM_MODEL":    "nemotron-3-super:cloud",         # Ollama model name or OpenAI/Anthropic model name",
+    "NYXSTRIKE_LLM_MODEL":    "qwen3.5:397b-cloud",             # Ollama model name or OpenAI/Anthropic model name",
     "NYXSTRIKE_LLM_URL":      "https://ollama.com",             # Ollama: local or https://ollama.com (cloud)
     "NYXSTRIKE_LLM_API_KEY":  "a6fe38c3983c4ba5b142dfba6528cef6.k18PBm0OvXKh1opZxYKUgrEN",  # openai/anthropic; ollama.com also accepts OLLAMA_API_KEY
     "NYXSTRIKE_LLM_TIMEOUT":  600,                              # seconds
