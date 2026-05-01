@@ -67,6 +67,19 @@ def _iter_sse_text_chunks(text: str, chunk_chars: int = 72):
     yield text[i : i + step]
 
 
+def _str_field(value: Any) -> str:
+  """Normalize JSON / DB values for text handling.
+
+  ``(value or '').strip()`` breaks when ``value`` is the boolean ``True``:
+  ``(True or '')`` is ``True``, and ``True.strip()`` raises.
+  """
+  if value is None:
+    return ""
+  if isinstance(value, str):
+    return value.strip()
+  return str(value).strip()
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _session_context_snippet(page: str, session_id: str) -> str:
@@ -122,7 +135,7 @@ def _maybe_summarize(chat_session_id: str) -> None:
     return
 
   session = db.get_chat_session(chat_session_id)
-  existing = (session or {}).get("summary", "") or ""
+  existing = _str_field((session or {}).get("summary"))
   combined = f"{existing}\n\nMore recently: {new_summary}" if existing else new_summary
 
   db.update_chat_summary(chat_session_id, combined)
@@ -158,7 +171,7 @@ def _build_llm_messages(
 
   # 3. Rolling summary of old messages
   chat_sess = db.get_chat_session(chat_session_id)
-  summary = (chat_sess or {}).get("summary", "") or ""
+  summary = _str_field((chat_sess or {}).get("summary"))
   if summary:
     messages.append({
       "role": "system",
@@ -421,7 +434,7 @@ def rename_chat_session(chat_session_id: str):
   """Rename a chat session."""
   try:
     body = request.get_json(force=True, silent=True) or {}
-    name = (body.get("name") or "").strip()
+    name = _str_field(body.get("name"))
     if not name:
       return jsonify({"success": False, "error": "name is required"}), 400
     sess = db.get_chat_session(chat_session_id)
@@ -470,7 +483,7 @@ def send_chat_message(chat_session_id: str):
       return jsonify({"success": False, "error": "LLM is not available"}), 503
 
     body = request.get_json(force=True, silent=True) or {}
-    user_message = (body.get("message") or "").strip()
+    user_message = _str_field(body.get("message"))
     if not user_message:
       return jsonify({"success": False, "error": "message is required"}), 400
 
@@ -483,7 +496,7 @@ def send_chat_message(chat_session_id: str):
       return jsonify({"success": False, "error": "Chat session not found"}), 404
 
     # Auto-name from first message
-    if not (sess.get("name") or "").strip():
+    if not _str_field(sess.get("name")):
       auto_name = user_message[:50] + ("…" if len(user_message) > 50 else "")
       db.rename_chat_session(chat_session_id, auto_name)
 

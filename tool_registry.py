@@ -1991,8 +1991,10 @@ def _classify_with_llm(user_input: str, llm_client) -> str:
         )
         text = response if isinstance(response, str) else str(response or "")
         parts = text.lower().split("category:")
-        final_resp = parts[1].strip() if len(parts) > 1 else text.lower().strip()
-        return final_resp
+        branch = parts[1] if len(parts) > 1 else text.lower()
+        if not isinstance(branch, str):
+          branch = str(branch or "")
+        return branch.strip()
     except Exception as exc:
         logger.warning("LLM intent classification failed for input %r: %s", user_input, exc)
         return ""
@@ -2006,6 +2008,8 @@ def classify_intent(user_input: str, llm_client=None) -> tuple:
         0.75 - keyword winner but narrow margin
         0.5  - no llm_client available and low/zero keyword signal
     """
+    if not isinstance(user_input, str):
+        user_input = str(user_input or "")
     text = user_input.lower()
     scores: Dict[str, int] = {cat: 0 for cat in CATEGORIES}
     for cat, keywords in _INTENT_KEYWORDS.items():

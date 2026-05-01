@@ -642,8 +642,15 @@ class LLMClient:
 
     result = self._backend.chat(messages, stop, think=think, num_ctx=num_ctx)
     if isinstance(result, dict):
-      return result["content"]
-    return result
+      c = result.get("content")
+      if isinstance(c, str):
+        return c
+      if c is None:
+        return ""
+      return str(c)
+    if isinstance(result, str):
+      return result
+    return str(result) if result is not None else ""
 
   def stream_chat(self, messages: List[Dict[str, Any]], num_ctx: Optional[int] = None) -> Generator:
     if self._backend is None:
