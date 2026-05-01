@@ -1,0 +1,16 @@
+{
+	"servers": {
+		"test1": {
+			"type": "stdio",
+			"command": "/home/tls/nyxstrike/nyxstrike-env/bin/python3",
+			"args": [
+				"/home/tls/nyxstrike/nyxstrike_mcp.py",
+				"--server",
+				"http://127.0.0.1:8888",
+				"--profile",
+				"full"
+			]
+		}
+	},
+	"inputs": []
+}
