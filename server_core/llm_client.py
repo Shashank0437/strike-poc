@@ -3,37 +3,29 @@ server_core/llm_client.py
 
 Provider-agnostic LLM adapter for NyxStrike.
 
-Selects a backend at construction time based on config/env vars and exposes a
-single chat() method. All feature code calls LLMClient — never a backend
-directly — so swapping providers is a one-line config change.
+Reads configuration from env vars, config_local.json, and config.py defaults.
 
 Supported backends:
-  ollama     — local Ollama (default) or Ollama Cloud at https://ollama.com (API key required)
-  openai     — OpenAI or Azure OpenAI via the openai SDK
-  anthropic  — Anthropic Claude via the anthropic SDK
+  gemini      — Google Generative AI (Gemini). API key: NYXSTRIKE_LLM_API_KEY, GOOGLE_API_KEY, or GEMINI_API_KEY
+  openai      — OpenAI or Azure OpenAI via the openai SDK
+  anthropic   — Anthropic Claude via the anthropic SDK
 
-Config keys (checked in order: env var → config_local.json → config.py defaults):
-  NYXSTRIKE_LLM_PROVIDER    ollama | openai | anthropic
-  NYXSTRIKE_LLM_MODEL       model name
-  NYXSTRIKE_LLM_URL         base URL (Ollama: http://localhost:11434 or https://ollama.com for cloud)
-  NYXSTRIKE_LLM_API_KEY     not used for local Ollama; for ollama.com set this or OLLAMA_API_KEY
-  NYXSTRIKE_LLM_MAX_LOOPS   max agentic tool loops
-  NYXSTRIKE_LLM_TIMEOUT     request timeout in seconds
-  NYXSTRIKE_LLM_THINK       enable model thinking/reasoning (default: false, Ollama only)
-
-Defaults are defined in config.py and can be overridden via config_local.json
-or environment variables without touching source code.
-
-Usage:
-  from server_core.singletons import llm_client
-  if llm_client.is_available():
-      response = llm_client.chat([{"role": "user", "content": "Hello"}])
+Config keys:
+  NYXSTRIKE_LLM_PROVIDER       gemini | openai | anthropic
+  NYXSTRIKE_LLM_MODEL          e.g. gemini-2.0-flash, gpt-4o, claude-3-5-sonnet-latest
+  NYXSTRIKE_LLM_URL            optional (OpenAI custom base URL only; ignored for gemini / anthropic)
+  NYXSTRIKE_LLM_API_KEY        primary secret (also checks provider-specific env vars)
+  NYXSTRIKE_LLM_MAX_LOOPS
+  NYXSTRIKE_LLM_TIMEOUT
+  NYXSTRIKE_LLM_NUM_CTX        max output-ish hint for Gemini / context sizing hints
 """
 
 import logging
 import json
 import os
-from typing import Generator, List, Dict, Any, Optional
+import uuid
+from typing import Any, Dict, Generator, List, Optional
+from urllib.parse import quote
 
 import requests
 
@@ -47,258 +39,270 @@ def _cfg(key: str, default: str = "") -> str:
   return os.environ.get(key) or config_core.get(key, default)
 
 
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
+# Legacy default URL from older setups — treat as «no OpenAI override»
+# Treat empty or common non-OpenAI URLs as «use default OpenAI endpoint»
+_LEGACY_OPENAI_BASE_IGNORE = frozenset({
+  "", "http://localhost:11434", "http://127.0.0.1:11434",
+})
 
-# ── Backend implementations ────────────────────────────────────────────────────
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-class OllamaBackend:
-  """Ollama HTTP API — local ``ollama serve`` or remote Ollama Cloud (ollama.com)."""
 
-  def __init__(
-    self,
-    base_url: str,
-    model: str,
-    timeout: int,
-    think: bool = False,
-    num_ctx: int = 4096,
-    api_key: str = "",
-  ) -> None:
-    self._base_url = base_url.rstrip("/")
-    self._model = model
+def _normalize_gemini_model_id(model: str) -> str:
+  m = (model or "").strip()
+  if m.startswith("models/"):
+    m = m[len("models/") :]
+  return m
+
+
+class GeminiBackend:
+  """Google Gemini via Generative Language REST API (API key authentication)."""
+
+  def __init__(self, model: str, api_key: str, timeout: int, max_output_tokens: int = 8192) -> None:
+    key = (api_key or "").strip()
+    self._model = _normalize_gemini_model_id(model)
+    self._api_key = key
     self._timeout = timeout
-    self._think = think
-    self._num_ctx = num_ctx
-    self._api_key = (api_key or "").strip()
-    self._http_headers: Dict[str, str] = {}
-    if self._api_key:
-      self._http_headers["Authorization"] = f"Bearer {self._api_key}"
-    self._chat_url = f"{self._base_url}/api/chat"
-    self._tags_url = f"{self._base_url}/api/tags"
+    self._max_output_tokens = min(max(max_output_tokens, 256), 8192)
 
-  def _is_direct_ollama_com(self) -> bool:
-    """True when calling the public Ollama Cloud API (not a local ollama serve)."""
-    h = (self._base_url or "").lower()
-    return "ollama.com" in h and "127.0.0.1" not in h and "localhost" not in h
-
-  def _request_model_name(self) -> str:
-    """Model id to send in JSON. ollama.com uses different tags than the local CLI (see ollama.com/docs cloud)."""
-    m = self._model
-    if not self._is_direct_ollama_com():
-      return m
-    if m.endswith("-cloud"):
-      return m[: -len("-cloud")]
-    if m.endswith(":cloud"):
-      return m[: -len(":cloud")]
-    return m
+  def _endpoint(self, action: str) -> str:
+    mid = quote(self._model, safe="/")
+    return f"{GEMINI_API_BASE}/models/{mid}:{action}?key={self._api_key}"
 
   @staticmethod
-  def _ollama_http_error_message(exc: Any, base_url: str) -> str:
+  def _http_error(exc: requests.exceptions.HTTPError) -> RuntimeError:
     if not isinstance(exc, requests.exceptions.HTTPError) or not exc.response:
-      return f"Ollama HTTP error: {exc}"
+      return RuntimeError(f"Gemini API error: {exc}")
     r = exc.response
-    code = r.status_code
-    hint = ""
-    if "ollama.com" in (base_url or "") and code in (401, 403):
-      hint = (
-        " For ollama.com create a key at https://ollama.com/settings/keys and set "
-        "OLLAMA_API_KEY or NYXSTRIKE_LLM_API_KEY in the server environment."
-      )
     try:
-      body = (r.text or "")[:400]
+      body = (r.text or "")[:800]
     except Exception:
       body = ""
-    detail = f" {body!r}" if body else ""
-    return f"Ollama HTTP {code} {r.reason} for {r.url}.{detail}{hint}"
+    return RuntimeError(f"Gemini HTTP {r.status_code} for {r.url}: {body!r}")
 
   @staticmethod
-  def _tag_matches_model(tag_name: str, configured: str) -> bool:
-    """True if an entry from /api/tags refers to the configured model name."""
-    if not tag_name or not configured:
-      return False
-    if tag_name == configured:
-      return True
-    if tag_name.startswith(configured + ":"):
-      return True
-    if configured.startswith(tag_name + ":"):
-      return True
-    return False
+  def _build_contents(messages: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]]]:
+    """Fold NyxStrike-style messages into Gemini ``contents`` + ``systemInstruction`` text."""
+    system_parts: List[str] = []
+    contents: List[Dict[str, Any]] = []
+    user_buffer: List[str] = []
 
-  def chat(self, messages: List[Dict[str, Any]], stop: List[str] = [], think: Optional[bool] = None, num_ctx: Optional[int] = None, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Send messages to Ollama /api/chat and return the response.
+    def flush_user() -> None:
+      if user_buffer:
+        text = "\n\n".join(user_buffer)
+        contents.append({"role": "user", "parts": [{"text": text}]})
+        user_buffer.clear()
 
-    When ``tools`` is provided the model may return tool_calls instead of (or
-    in addition to) plain text content.  The return value is always a dict:
-      {"content": str, "tool_calls": list | None}
+    for m in messages:
+      role = m.get("role", "user")
+      content = m.get("content", "")
+      if not isinstance(content, str):
+        content = json.dumps(content)
+      if role == "system":
+        system_parts.append(content)
+      elif role == "user":
+        user_buffer.append(content)
+      elif role == "assistant":
+        flush_user()
+        contents.append({"role": "model", "parts": [{"text": content}]})
+      elif role == "tool":
+        flush_user()
+        contents.append({"role": "user", "parts": [{"text": f"[Tool result]\n{content}"}]})
+      else:
+        user_buffer.append(f"[{role}]\n{content}")
+    flush_user()
+    sys_text = "\n\n".join(system_parts).strip()
+    return sys_text, contents
 
-    When called without tools the content string is still the primary value;
-    callers that only care about text can do ``result["content"]``.
-    """
-    rm = self._request_model_name()
-    payload: Dict[str, Any] = {
-      "model": rm,
-      "messages": messages,
-      "stream": False,
-      "options": {"num_ctx": num_ctx or self._num_ctx},
+  @staticmethod
+  def _openai_tools_to_gemini_declarations(schemas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert OpenAI-style ``tools`` entries to Gemini ``functionDeclarations``."""
+    decls: List[Dict[str, Any]] = []
+    for schema in schemas:
+      fn = schema.get("function") or schema
+      name = fn.get("name")
+      if not name:
+        continue
+      params = fn.get("parameters") or {"type": "OBJECT", "properties": {}}
+      decls.append({
+        "name": name,
+        "description": fn.get("description", "")[:4000],
+        "parameters": params,
+      })
+    return decls
+
+  @staticmethod
+  def _parse_tool_calls_from_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if not parts:
+      return out
+    for part in parts:
+      fc = part.get("functionCall")
+      if not fc:
+        continue
+      raw_args = fc.get("args", {})
+      if isinstance(raw_args, str):
+        try:
+          args = json.loads(raw_args)
+        except json.JSONDecodeError:
+          args = {"_raw": raw_args}
+      else:
+        args = dict(raw_args) if isinstance(raw_args, dict) else {}
+      out.append({
+        "id": fc.get("id") or uuid.uuid4().hex,
+        "type": "function",
+        "function": {"name": fc.get("name", ""), "arguments": args},
+      })
+    return out
+
+  @staticmethod
+  def _extract_text(parts: List[Dict[str, Any]]) -> str:
+    texts = [p["text"] for p in parts if "text" in p]
+    return "".join(texts).strip()
+
+  def chat(
+    self,
+    messages: List[Dict[str, Any]],
+    stop: List[str] = [],
+    think: Optional[bool] = None,
+    num_ctx: Optional[int] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+  ) -> Dict[str, Any]:
+    sys_text, contents = self._build_contents(messages)
+    body: Dict[str, Any] = {
+      "contents": contents,
+      "generationConfig": {
+        "temperature": 0.7,
+        "maxOutputTokens": self._max_output_tokens,
+      },
     }
-    if not self._is_direct_ollama_com():
-      payload["think"] = think if think is not None else self._think
+    if sys_text:
+      body["systemInstruction"] = {"parts": [{"text": sys_text}]}
     if stop:
-      payload["options"]["stop"] = stop
-    if tools:
-      payload["tools"] = tools
+      body["generationConfig"]["stopSequences"] = stop[:5]
 
+    gemini_tools: List[Dict[str, Any]] = []
+    if tools:
+      decls = self._openai_tools_to_gemini_declarations(tools)
+      if decls:
+        gemini_tools.append({"functionDeclarations": decls})
+        body["tools"] = gemini_tools
+        body["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
+
+    url = self._endpoint("generateContent")
     try:
-      resp = requests.post(
-        self._chat_url, json=payload, timeout=self._timeout, headers=self._http_headers
-      )
+      resp = requests.post(url, json=body, timeout=self._timeout)
       resp.raise_for_status()
       data = resp.json()
-      msg = data.get("message", {})
-      return {
-        "content": (msg.get("content") or "").strip(),
-        "tool_calls": msg.get("tool_calls") or None,
-      }
-    except requests.exceptions.ConnectionError:
-      raise RuntimeError(
-        f"Cannot connect to Ollama at {self._base_url}. "
-        "Is the server running? Try: ollama serve"
-      )
     except requests.exceptions.Timeout:
-      raise RuntimeError(
-        f"Ollama request timed out after {self._timeout}s. "
-        "The model may still be loading — try again in a moment"
-      )
+      raise RuntimeError(f"Gemini request timed out after {self._timeout}s")
     except requests.exceptions.HTTPError as exc:
-      raise RuntimeError(self._ollama_http_error_message(exc, self._base_url))
+      raise self._http_error(exc)
+    except requests.exceptions.ConnectionError as exc:
+      raise RuntimeError(f"Cannot reach Gemini API: {exc}") from exc
 
-  def is_available(self) -> bool:
-    """Return True if Ollama is reachable and the configured model exists."""
-    try:
-      resp = requests.get(self._tags_url, timeout=5, headers=self._http_headers)
-      if resp.status_code != 200:
-        return False
-      models = [m.get("name", "") for m in resp.json().get("models", [])]
-      req = self._request_model_name()
-      return any(
-        self._tag_matches_model(m, self._model) or self._tag_matches_model(m, req)
-        for m in models
-      )
-    except Exception:
-      return False
+    cands = data.get("candidates") or []
+    if not cands:
+      err = data.get("error", {})
+      raise RuntimeError(f"Gemini returned no candidates: {err!r}")
 
-  def warm_up(self) -> None:
-    """Send a minimal prompt to pre-load the model into memory.
-
-    Called once at server startup in a background thread so the first real
-    request does not stall waiting for the model to cold-load.
-    """
-    if not self.is_available():
-      logger.warning("Ollama warm-up skipped: model '%s' not available.", self._model)
-      return
-    try:
-      rm = self._request_model_name()
-      logger.info("Warming up Ollama model '%s' (api id %r)...", self._model, rm)
-      warm: Dict[str, Any] = {
-        "model": rm,
-        "messages": [{"role": "user", "content": "hi"}],
-        "stream": False,
-        "options": {"num_predict": 1},
-      }
-      if not self._is_direct_ollama_com():
-        warm["think"] = False
-      requests.post(
-        self._chat_url,
-        json=warm,
-        timeout=self._timeout,
-        headers=self._http_headers,
-      )
-      logger.info("Ollama model '%s' warm-up complete.", self._model)
-    except Exception as exc:
-      logger.warning("Ollama warm-up failed (non-fatal): %s", exc)
+    parts = ((cands[0].get("content") or {}).get("parts")) or []
+    text = self._extract_text(parts)
+    tool_calls = self._parse_tool_calls_from_parts(parts)
+    tool_calls_norm = tool_calls if tool_calls else None
+    return {"content": text, "tool_calls": tool_calls_norm}
 
   def stream_chat(self, messages: List[Dict[str, Any]], num_ctx: Optional[int] = None) -> Generator:
-    """Stream tokens from Ollama one chunk at a time via NDJSON.
-
-    Yields:
-      str — content token chunks
-      dict — final item: response stats (eval_count, duration, tokens/sec, etc.)
-    """
-    keep_alive = int(os.environ.get("NYXSTRIKE_LLM_KEEP_ALIVE") or 300)
-    rm = self._request_model_name()
-    payload: Dict[str, Any] = {
-      "model": rm,
-      "messages": messages,
-      "stream": True,
-      "options": {"num_ctx": num_ctx or self._num_ctx},
+    sys_text, contents = self._build_contents(messages)
+    mo = min(max((num_ctx or self._max_output_tokens), 256), 8192)
+    body: Dict[str, Any] = {
+      "contents": contents,
+      "generationConfig": {"temperature": 0.7, "maxOutputTokens": mo},
     }
-    if not self._is_direct_ollama_com():
-      payload["think"] = self._think
-      payload["keep_alive"] = keep_alive
+    if sys_text:
+      body["systemInstruction"] = {"parts": [{"text": sys_text}]}
+
+    url = self._endpoint("streamGenerateContent") + "&alt=sse"
     try:
-      with requests.post(
-        self._chat_url, json=payload, timeout=self._timeout, stream=True, headers=self._http_headers
-      ) as resp:
+      with requests.post(url, json=body, stream=True, timeout=self._timeout) as resp:
         resp.raise_for_status()
-        for line in resp.iter_lines():
-          if not line:
+        last_usage: Dict[str, Any] = {}
+        for raw in resp.iter_lines(decode_unicode=True):
+          if not raw or not isinstance(raw, str):
+            continue
+          line = raw.strip()
+          if not line.startswith("data: "):
+            continue
+          payload = line[6:].strip()
+          if payload in ("", "[DONE]"):
             continue
           try:
-            data = json.loads(line)
+            data = json.loads(payload)
           except json.JSONDecodeError:
             continue
-          msg = data.get("message", {})
-          # Ollama returns thinking tokens separately from content when think=true
-          thinking_chunk = msg.get("thinking", "")
-          if thinking_chunk:
-            yield {"type": "thinking", "content": thinking_chunk}
-          chunk = msg.get("content", "")
-          if chunk:
-            yield chunk
-          if data.get("done"):
-            # Extract stats from the final chunk
-            eval_count = data.get("eval_count", 0)
-            eval_duration = data.get("eval_duration", 0)
-            total_duration = data.get("total_duration", 0)
-            prompt_eval_count = data.get("prompt_eval_count", 0)
-            # Durations are in nanoseconds
-            eval_secs = eval_duration / 1e9 if eval_duration else 0
-            total_secs = total_duration / 1e9 if total_duration else 0
-            tokens_per_sec = eval_count / eval_secs if eval_secs > 0 else 0
-            yield {
-              "eval_count": eval_count,
-              "prompt_eval_count": prompt_eval_count,
-              "total_duration_s": round(total_secs, 2),
-              "eval_duration_s": round(eval_secs, 2),
-              "tokens_per_sec": round(tokens_per_sec, 1),
-            }
-            break
-    except requests.exceptions.ConnectionError:
-      raise RuntimeError(f"Cannot connect to Ollama at {self._base_url}.")
+          meta = data.get("usageMetadata")
+          if isinstance(meta, dict):
+            last_usage.update(meta)
+
+          for cand in data.get("candidates") or []:
+            for part in (cand.get("content") or {}).get("parts") or []:
+              if "text" in part and part["text"]:
+                yield part["text"]
+
+        prompt = last_usage.get("promptTokenCount", 0)
+        total = last_usage.get("totalTokenCount", 0)
+        cand = total - prompt if total and prompt else 0
+        if last_usage:
+          yield {
+            "eval_count": cand,
+            "prompt_eval_count": prompt,
+            "total_duration_s": 0.0,
+            "eval_duration_s": 0.0,
+            "tokens_per_sec": 0.0,
+          }
     except requests.exceptions.Timeout:
-      raise RuntimeError(f"Ollama stream timed out after {self._timeout}s.")
+      raise RuntimeError(f"Gemini stream timed out after {self._timeout}s")
     except requests.exceptions.HTTPError as exc:
-      raise RuntimeError(self._ollama_http_error_message(exc, self._base_url))
+      raise self._http_error(exc)
+    except requests.exceptions.ConnectionError as exc:
+      raise RuntimeError(f"Cannot reach Gemini API: {exc}") from exc
 
   def generate_summary(self, messages: List[Dict[str, Any]]) -> str:
-    """Summarize a list of messages into a short paragraph (non-streaming)."""
-    conversation = "\n".join(
-      f"{m['role'].capitalize()}: {m['content']}" for m in messages
-    )
+    conversation = "\n".join(f"{m['role'].capitalize()}: {m['content']}" for m in messages)
     summary_prompt = (
       "Summarize the following conversation in 2-3 sentences, "
       "preserving key facts, targets, commands, and findings. "
       "Be concise and technical.\n\n" + conversation
     )
-    result = self.chat([{"role": "user", "content": summary_prompt}])
-    return result["content"] if isinstance(result, dict) else result
+    r = self.chat([{"role": "user", "content": summary_prompt}])
+    return (r.get("content") or "").strip() if isinstance(r, dict) else str(r)
+
+  def warm_up(self) -> None:
+    try:
+      self.chat([{"role": "user", "content": "Say OK"}])
+    except Exception as exc:
+      logger.warning("Gemini warm-up failed (non-fatal): %s", exc)
+
+  def is_available(self) -> bool:
+    """True if ``GOOGLE_API_KEY`` works and ``GET …/models/{id}`` succeeds."""
+    if not self._api_key:
+      return False
+    try:
+      mid = quote(self._model, safe="/")
+      u = f"{GEMINI_API_BASE}/models/{mid}?key={self._api_key}"
+      resp = requests.get(u, timeout=10)
+      return resp.status_code == 200
+    except Exception:
+      return False
 
   @property
   def provider(self) -> str:
-    return "ollama"
+    return "gemini"
 
   @property
   def model(self) -> str:
     return self._model
+
 
 class OpenAIBackend:
   """OpenAI / Azure OpenAI backend via the openai SDK."""
@@ -318,7 +322,14 @@ class OpenAIBackend:
         "openai SDK not installed. Run: pip install openai"
       )
 
-  def chat(self, messages: List[Dict[str, Any]], stop: List[str] = [], think: Optional[bool] = None, num_ctx: Optional[int] = None) -> str:
+  def chat(
+    self,
+    messages: List[Dict[str, Any]],
+    stop: List[str] = [],
+    think: Optional[bool] = None,
+    num_ctx: Optional[int] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+  ) -> Any:
     kwargs: Dict[str, Any] = {
       "model": self._model,
       "messages": messages,
@@ -327,14 +338,30 @@ class OpenAIBackend:
     }
     if stop:
       kwargs["stop"] = stop
+    if tools:
+      kwargs["tools"] = tools
+      kwargs["tool_choice"] = "auto"
     try:
       resp = self._client.chat.completions.create(**kwargs)
-      return resp.choices[0].message.content.strip()
+      msg = resp.choices[0].message
+      if getattr(msg, "tool_calls", None):
+        tcs = []
+        for tc in msg.tool_calls:
+          args = tc.function.arguments
+          if isinstance(args, str):
+            try:
+              ad = json.loads(args)
+            except json.JSONDecodeError:
+              ad = {"_raw": args}
+          else:
+            ad = dict(args) if isinstance(args, dict) else {}
+          tcs.append({"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": ad}})
+        return {"content": (msg.content or "").strip(), "tool_calls": tcs}
+      return {"content": (msg.content or "").strip(), "tool_calls": None}
     except Exception as exc:
       raise RuntimeError(f"OpenAI API error: {exc}")
 
   def stream_chat(self, messages: List[Dict[str, Any]], num_ctx: Optional[int] = None) -> Generator[str, None, None]:
-    """Stream tokens from OpenAI one delta at a time."""
     kwargs: Dict[str, Any] = {
       "model": self._model,
       "messages": messages,
@@ -352,16 +379,14 @@ class OpenAIBackend:
       raise RuntimeError(f"OpenAI streaming error: {exc}")
 
   def generate_summary(self, messages: List[Dict[str, Any]]) -> str:
-    """Summarize a list of messages into a short paragraph (non-streaming)."""
-    conversation = "\n".join(
-      f"{m['role'].capitalize()}: {m['content']}" for m in messages
-    )
+    conversation = "\n".join(f"{m['role'].capitalize()}: {m['content']}" for m in messages)
     summary_prompt = (
       "Summarize the following conversation in 2-3 sentences, "
       "preserving key facts, targets, commands, and findings. "
       "Be concise and technical.\n\n" + conversation
     )
-    return self.chat([{"role": "user", "content": summary_prompt}])
+    r = self.chat([{"role": "user", "content": summary_prompt}])
+    return r["content"] if isinstance(r, dict) else str(r)
 
   def is_available(self) -> bool:
     return True
@@ -390,7 +415,6 @@ class AnthropicBackend:
       )
 
   def chat(self, messages: List[Dict[str, Any]], stop: List[str] = [], think: Optional[bool] = None, num_ctx: Optional[int] = None) -> str:
-    # Anthropic separates system from human/assistant messages
     system_parts = [m["content"] for m in messages if m["role"] == "system"]
     user_messages = [m for m in messages if m["role"] != "system"]
     system_text = "\n\n".join(system_parts)
@@ -410,7 +434,6 @@ class AnthropicBackend:
       raise RuntimeError(f"Anthropic API error: {exc}")
 
   def stream_chat(self, messages: List[Dict[str, Any]], num_ctx: Optional[int] = None) -> Generator[str, None, None]:
-    """Stream tokens from Anthropic one delta at a time."""
     system_parts = [m["content"] for m in messages if m["role"] == "system"]
     user_messages = [m for m in messages if m["role"] != "system"]
     system_text = "\n\n".join(system_parts)
@@ -430,10 +453,7 @@ class AnthropicBackend:
       raise RuntimeError(f"Anthropic streaming error: {exc}")
 
   def generate_summary(self, messages: List[Dict[str, Any]]) -> str:
-    """Summarize a list of messages into a short paragraph (non-streaming)."""
-    conversation = "\n".join(
-      f"{m['role'].capitalize()}: {m['content']}" for m in messages
-    )
+    conversation = "\n".join(f"{m['role'].capitalize()}: {m['content']}" for m in messages)
     summary_prompt = (
       "Summarize the following conversation in 2-3 sentences, "
       "preserving key facts, targets, commands, and findings. "
@@ -443,7 +463,6 @@ class AnthropicBackend:
 
   def is_available(self) -> bool:
     try:
-      # Cheap check — list models endpoint
       self._client.models.list()
       return True
     except Exception:
@@ -458,55 +477,40 @@ class AnthropicBackend:
     return self._model
 
 
-# ── Public facade ─────────────────────────────────────────────────────────────
-
 class LLMClient:
-  """Provider-agnostic LLM client.
-
-  Reads configuration at construction time and builds the appropriate backend.
-  If construction fails (e.g. missing SDK, bad config), is_available() returns
-  False and chat() raises RuntimeError — callers should guard with is_available().
-
-  Attributes exposed for logging / persistence:
-    provider  — "ollama" | "openai" | "anthropic"
-    model     — model name string
-    max_loops — configured maximum tool dispatch loops
-  """
+  """Provider-agnostic LLM client."""
 
   def __init__(self) -> None:
     self.max_loops: int = int(_cfg("NYXSTRIKE_LLM_MAX_LOOPS") or 9)
     self._backend: Any = None
     self._init_error: str = ""
 
-    # Only initialise a backend when AI mode is explicitly enabled..
-    import os as _os
-    if _os.environ.get("NYXSTRIKE_LLM_WARMUP") != "1":
+    if os.environ.get("NYXSTRIKE_LLM_WARMUP") != "1":
       return
 
-    provider = _cfg("NYXSTRIKE_LLM_PROVIDER").lower()
-    model = _cfg("NYXSTRIKE_LLM_MODEL")
-    base_url = _cfg("NYXSTRIKE_LLM_URL")
-    api_key = _cfg("NYXSTRIKE_LLM_API_KEY")
+    provider = (_cfg("NYXSTRIKE_LLM_PROVIDER") or "gemini").lower()
+    model = _cfg("NYXSTRIKE_LLM_MODEL") or "gemini-2.0-flash"
+    base_url = (_cfg("NYXSTRIKE_LLM_URL") or "").strip()
+    api_key = (_cfg("NYXSTRIKE_LLM_API_KEY") or "").strip()
     timeout = int(_cfg("NYXSTRIKE_LLM_TIMEOUT") or 300)
-    think_raw = _cfg("NYXSTRIKE_LLM_THINK")
-    think = str(think_raw).lower() in ("1", "true", "yes")
-    num_ctx = int(_cfg("NYXSTRIKE_LLM_NUM_CTX") or 4096)
+    num_ctx = int(_cfg("NYXSTRIKE_LLM_NUM_CTX") or 8192)
     self._num_ctx_analyse = int(_cfg("NYXSTRIKE_LLM_NUM_CTX_ANALYSE") or 16384)
 
-    ollama_api_key = (
-      (api_key or "").strip() or (os.environ.get("OLLAMA_API_KEY") or "").strip()
-    )
+    gemini_key = api_key or (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or "").strip()
+
+    openai_base: Optional[str] = None
+    if base_url and base_url.strip() not in _LEGACY_OPENAI_BASE_IGNORE:
+      openai_base = base_url.strip()
+
     try:
-      if provider == "ollama":
-        self._backend = OllamaBackend(
-          base_url, model, timeout, think, num_ctx, ollama_api_key
-        )
+      if provider == "gemini":
+        self._backend = GeminiBackend(model, gemini_key, timeout, max_output_tokens=num_ctx)
       elif provider == "openai":
-        self._backend = OpenAIBackend(model, api_key, base_url if base_url != DEFAULT_OLLAMA_URL else None, timeout)
+        self._backend = OpenAIBackend(model, api_key, openai_base, timeout)
       elif provider == "anthropic":
         self._backend = AnthropicBackend(model, api_key, timeout)
       else:
-        raise ValueError(f"Unknown LLM provider: {provider!r}. Choose: ollama, openai, anthropic")
+        raise ValueError(f"Unknown LLM provider: {provider!r}. Choose: gemini, openai, anthropic")
 
       logger.info(
         "llm_client: initialized provider=%s model=%s",
@@ -530,7 +534,6 @@ class LLMClient:
     return getattr(self, '_num_ctx_analyse', 16384)
 
   def is_available(self) -> bool:
-    """Return True if the LLM backend is reachable. Never raises."""
     if self._backend is None:
       return False
     try:
@@ -539,65 +542,38 @@ class LLMClient:
       return False
 
   def warm_up(self) -> None:
-    """Pre-load the model into memory. No-op for non-Ollama backends."""
     if self._backend is None:
       return
     if hasattr(self._backend, "warm_up"):
       self._backend.warm_up()
 
-  def chat(self, messages: List[Dict[str, Any]], stop: List[str] = [], think: Optional[bool] = None, num_ctx: Optional[int] = None, tools: Optional[List[Dict[str, Any]]] = None) -> Any:
-    """Send messages and return the model's response.
-
-    When ``tools`` is omitted (the common case) returns a plain ``str``.
-    When ``tools`` is provided returns a dict:
-      {"content": str, "tool_calls": list | None}
-    so callers can inspect requested tool invocations.
-
-    Args:
-      messages: List of {"role": "system"|"user"|"assistant", "content": str}
-      stop:     Optional stop sequences.
-      think:    Override thinking mode for this call (None = use default).
-      num_ctx:  Override context window size for this call (None = use default).
-      tools:    Optional list of Ollama-format tool schemas.  If provided the
-                model may respond with tool_calls instead of plain text.
-
-    Raises:
-      RuntimeError: If the backend is not initialized or the call fails.
-    """
+  def chat(
+    self,
+    messages: List[Dict[str, Any]],
+    stop: List[str] = [],
+    think: Optional[bool] = None,
+    num_ctx: Optional[int] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+  ) -> Any:
     if self._backend is None:
       raise RuntimeError(
         f"LLM client not initialized: {self._init_error or 'unknown error'}"
       )
-    # Only OllamaBackend accepts tools; other backends fall back to plain text.
-    if tools and hasattr(self._backend, 'chat'):
+    if tools and hasattr(self._backend, "chat"):
       try:
         result = self._backend.chat(messages, stop, think=think, num_ctx=num_ctx, tools=tools)
       except TypeError:
-        # Backend doesn't accept tools kwarg — strip and call without
         result = self._backend.chat(messages, stop, think=think, num_ctx=num_ctx)
-      # Normalise: if the backend returned a plain string, box it up
       if isinstance(result, str):
         return result
-      return result  # dict with content + tool_calls
-    # No tools requested — return plain string for backward compat
+      return result
+
     result = self._backend.chat(messages, stop, think=think, num_ctx=num_ctx)
     if isinstance(result, dict):
       return result["content"]
     return result
 
   def stream_chat(self, messages: List[Dict[str, Any]], num_ctx: Optional[int] = None) -> Generator:
-    """Stream the model's response token-by-token.
-
-    Args:
-      messages: List of {"role": "system"|"user"|"assistant", "content": str}
-      num_ctx:  Override context window size (None = use default).
-
-    Yields:
-      String chunks as they arrive from the model.
-
-    Raises:
-      RuntimeError: If the backend is not initialized or streaming fails.
-    """
     if self._backend is None:
       raise RuntimeError(
         f"LLM client not initialized: {self._init_error or 'unknown error'}"
@@ -607,21 +583,12 @@ class LLMClient:
     yield from self._backend.stream_chat(messages, num_ctx=num_ctx)
 
   def generate_summary(self, messages: List[Dict[str, Any]]) -> str:
-    """Summarize a message list into a short paragraph.
-
-    Used for rolling context compression in chat sessions.
-    Falls back to non-streaming chat() internally.
-
-    Raises:
-      RuntimeError: If the backend is not initialized or the call fails.
-    """
     if self._backend is None:
       raise RuntimeError(
         f"LLM client not initialized: {self._init_error or 'unknown error'}"
       )
     if hasattr(self._backend, "generate_summary"):
       return self._backend.generate_summary(messages)
-    # Fallback: use chat() directly
     conversation = "\n".join(
       f"{m['role'].capitalize()}: {m['content']}" for m in messages
     )
@@ -633,7 +600,6 @@ class LLMClient:
     return self.chat([{"role": "user", "content": prompt}])
 
   def status(self) -> Dict[str, Any]:
-    """Return a status dict suitable for the /llm-status health endpoint."""
     available = self.is_available()
     return {
       "available": available,
@@ -642,4 +608,3 @@ class LLMClient:
       "max_loops": self.max_loops,
       "error": self._init_error if not available else "",
     }
-

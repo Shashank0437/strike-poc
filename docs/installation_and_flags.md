@@ -49,8 +49,7 @@ Stamp files are stored in the venv, e.g.:
 | `-s` | `--update-self` | Run `git pull --ff-only` on this repo (skips when local changes exist) |
 | `-r` | `--run` | Start server after install (`./scripts/run.sh --server`) |
 | `-h` | `--help` | Show install script help |
-| `-ai` | *(none)* | Install Ollama (if missing), pull `huihui_ai/qwen3.5-abliterated:9b`, and create the `nyxstrike-ai` custom model. Requires ~8 GB RAM. |
-| `-ai-small` | *(none)* | Install Ollama (if missing), pull `huihui_ai/qwen3.5-abliterated:4b`, and create the `nyxstrike-ai` custom model. Requires ~4 GB RAM. |
+| `-ai` | *(none)* | When using `./nyxstrike.sh`: writes Google Gemini defaults to `config_local.json` and enables LLM warmup (`NYXSTRIKE_LLM_WARMUP`). Set `GOOGLE_API_KEY` or `GEMINI_API_KEY`. |
 
 ## Common Command Examples
 
@@ -90,29 +89,15 @@ bash scripts/install.sh -u -r
 bash scripts/install.sh --all
 ```
 
-### Install with local AI model (9b, ~8 GB RAM)
+### LLM setup (Gemini via API key)
 
-Sets up Ollama, pulls the base model, and builds the `nyxstrike-ai` custom model
-from the `Modelfile` in the repo root. The `-ai` flag is **not** included in `-a/--all`
-and must be passed explicitly.
+The server uses Google Gemini when `NYXSTRIKE_LLM_PROVIDER` is `gemini` (the default in `config.py`).
+Set `GOOGLE_API_KEY`, `GEMINI_API_KEY`, or `NYXSTRIKE_LLM_API_KEY` in your environment — do not commit keys.
 
-```bash
-bash scripts/install.sh -ai
-```
-
-### Install with local AI model, smaller variant (4b, ~4 GB RAM)
-
-Same as above but uses the 4b base model and creates `nyxstrike-ai` instead.
-Choose this if you have less than ~8 GB of free RAM.
+When using `./nyxstrike.sh -ai`, the installer merges Gemini defaults into `config_local.json` and sets `NYXSTRIKE_LLM_WARMUP=1`.
 
 ```bash
-bash scripts/install.sh -ai-small
-```
-
-### Full install + local AI model
-
-```bash
-bash scripts/install.sh --all -ai
+./nyxstrike.sh -a -ai
 ```
 
 ## After Install

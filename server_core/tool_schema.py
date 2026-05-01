@@ -1,8 +1,7 @@
 """
 server_core/tool_schema.py
 
-Converts NyxStrike tool_registry entries into Ollama/OpenAI function-calling
-tool schemas.
+Converts NyxStrike tool_registry entries into OpenAI-style function tools.
 
 The registry is already categorised and effectiveness-sorted.  This module
 provides one entry point used by the chat layer:
@@ -10,8 +9,8 @@ provides one entry point used by the chat layer:
   build_tool_schemas(tools) -> List[dict]
 
 Where ``tools`` is the list returned by ``get_tools_for_category()`` or a
-hand-picked subset.  The output is ready to pass directly as the ``tools``
-argument to ``LLMClient.chat()``.
+hand-picked subset.  The output is OpenAI-style function tools, consumed by
+Gemini (functionDeclarations) and OpenAI backends via ``LLMClient.chat(tools=…)``.
 """
 
 from typing import Any, Dict, List
@@ -30,7 +29,7 @@ def _infer_type(default_value: Any) -> str:
 
 
 def _registry_entry_to_schema(name: str, tool_def: Dict[str, Any]) -> Dict[str, Any]:
-  """Convert a single full registry entry (from TOOLS dict) into an Ollama tool schema."""
+  """Convert a single full registry entry (from TOOLS dict) into OpenAI-style function tool schema."""
   properties: Dict[str, Any] = {}
   required: List[str] = []
 
@@ -60,20 +59,15 @@ def _registry_entry_to_schema(name: str, tool_def: Dict[str, Any]) -> Dict[str, 
 
 
 def build_tool_schemas(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-  """Convert a list of compact registry tool dicts into Ollama tool schemas.
+  """Convert compact registry tool dicts into OpenAI-format function tools.
 
   Each item in ``tools`` is the shape returned by ``get_tools_for_category()``:
+
     {"name": str, "desc": str, "endpoint": str, "method": str, "params": dict}
 
-  The ``params`` dict here already has the combined required + optional view
-  from get_tools_for_category (values are "REQUIRED" or "default=X" strings).
-  We reconstruct required/optional from that.
-
-  Args:
-    tools: List of compact tool dicts from get_tools_for_category().
-
-  Returns:
-    List of Ollama-compatible tool schema dicts.
+  The ``params`` dict merges required and optional keys as "REQUIRED" or
+  "default=…" strings. Returns ``{"type":"function","function":{…}}`` list;
+  ``LLMClient`` maps these to Gemini ``functionDeclarations`` when needed.
   """
   schemas = []
   for t in tools:

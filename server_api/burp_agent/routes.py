@@ -21,7 +21,7 @@ Endpoints:
         [TOOL_EXECUTING] {...}         — tool approved and running
         [TOOL_RESULT] {...}            — tool finished; result injected
         [FINAL_RESPONSE] <text>        — full final Markdown response
-        [STATS] {...}                  — token stats (Ollama only)
+        [STATS] {...}                  — token / usage stats when the backend provides them
         [DONE]                         — agent finished
         [CANCELLED]                    — agent cancelled by operator
         [ERROR] <msg>                  — unrecoverable error

@@ -7,14 +7,14 @@
 - Added chat personality settings and presets — tune the assistant's tone and behavior.
 - Added chat session renaming, deletion, stats tracking.
 - Added tool call resolution handling and streaming identifier improvements.
-- Enabled "think" mode and reasoning support in LLM backends (Ollama, OpenAI, Anthropic).
+- Enabled optional reasoning/streaming cues in chat where supported by the configured LLM provider.
 - And a few smaller features build into the chat.
 
 ### LLM analysis
 - Added `analyze_session` — passive LLM analysis pass that reads existing workflow session run logs, interprets them, and persists structured findings.
 - Added `llm_agent_scan_result` tool — retrieve results of completed LLM agent scan sessions.
 - Added `NyxStrikeDB` (SQLite) for persisting LLM analysis sessions and vulnerability findings.
-- Added `LLMClient` — provider-agnostic LLM adapter supporting Ollama, OpenAI, and Anthropic backends.
+- Added `LLMClient` — provider-agnostic LLM adapter supporting Gemini, OpenAI, and Anthropic backends.
 - Added internal API client for tool execution and classification from the chat layer.
 - Improved tool injection logic with confidence threshold and conversational pattern filtering.
 

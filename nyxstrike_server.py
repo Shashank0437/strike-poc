@@ -78,8 +78,8 @@ register_blueprints(app)
 load_plugins(app)
 initialize_update_status_check()
 
-# Pre-load the Ollama model in the background so it's ready before the first request.
-# Only runs when NYXSTRIKE_LLM_WARMUP=1 is set (done automatically by -ai / -ai-small flags).
+# Warm up the configured LLM client in the background before the first chat request.
+# Only runs when NYXSTRIKE_LLM_WARMUP=1 is set (e.g. nyxstrike.sh -ai).
 def _warm_up_llm() -> None:
   from server_core.singletons import llm_client
   llm_client.warm_up()

@@ -212,7 +212,7 @@ def _is_conversational(message: str) -> bool:
 def _get_tool_schemas_for_message(user_message: str) -> List[Dict[str, Any]]:
   """Use classify-task to get a focused tool shortlist for the user message.
 
-  Returns a list of Ollama tool schemas (may be empty if classification fails,
+  Returns a list of tool schemas in OpenAI function format (may be empty if classification fails,
   confidence is too low, or the message is clearly conversational).
   """
   # Fast path: skip tool injection entirely for conversational messages.
@@ -337,7 +337,7 @@ def _stream_llm_with_tools(
     yield "data: [THINKING]\n\n"
     for chunk in llm_client.stream_chat(llm_messages):
       if isinstance(chunk, dict):
-        # Thinking token chunk (Ollama reasoning tokens when think=true)
+        # Optional reasoning token chunk (not emitted by Gemini path)
         if chunk.get("type") == "thinking":
           yield f"data: [THINK_TOKEN] {json.dumps(chunk.get('content', ''))}\n\n"
           continue
@@ -444,7 +444,7 @@ def send_chat_message(chat_session_id: str):
   Response: text/event-stream
     data: [THINKING]\\n\\n              — model is working
     data: <token>\\n\\n                 — one event per token chunk
-    data: [STATS] {...}\\n\\n           — Ollama performance stats
+    data: [STATS] {...}\\n\\n           — token / timing stats when available
     data: [TOOL_CALL_PENDING] {...}\\n\\n — model wants to run a tool (awaiting confirmation)
     data: [DONE]\\n\\n                  — end of stream
     data: [ERROR] <msg>               — on failure

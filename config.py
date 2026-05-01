@@ -26,7 +26,7 @@ _config = {
     },
     "CLEAN_TOOL_OUTPUT": True,
     "CPU_NICE_THRESHOLD": 85,  # CPU% above which tool commands are niced down (nice -n 10)
-    "LLM_KEEP_ALIVE": 300,    # Seconds to keep the Ollama model in VRAM after each inference (default 5 min)
+    "LLM_KEEP_ALIVE": 300,    # Legacy slot (unused); reserved for future HTTP keep-alive tuning
     "CACHE_SIZE": 1000,
     "CACHE_TTL": 3600,  # 1 hour
     "TOOL_AVAILABILITY_TTL": 3600,  # 1 hour
@@ -35,15 +35,15 @@ _config = {
     "METASPLOIT_SESSION_WAIT": 10,  # Seconds to wait after exploit -j before listing sessions
 
     # ── LLM client ────────────────────────────────────────────────────────────
-    "NYXSTRIKE_LLM_PROVIDER": "ollama",                         # ollama | openai | anthropic
-    "NYXSTRIKE_LLM_MODEL":    "qwen3.5:397b-cloud",             # Ollama model name or OpenAI/Anthropic model name",
-    "NYXSTRIKE_LLM_URL":      "https://ollama.com",             # Ollama: local or https://ollama.com (cloud)
-    "NYXSTRIKE_LLM_API_KEY":  "a6fe38c3983c4ba5b142dfba6528cef6.k18PBm0OvXKh1opZxYKUgrEN",  # openai/anthropic; ollama.com also accepts OLLAMA_API_KEY
+    "NYXSTRIKE_LLM_PROVIDER": "gemini",                         # gemini | openai | anthropic
+    "NYXSTRIKE_LLM_MODEL":    "gemini-2.0-flash",               # e.g. gemini-2.0-flash, gpt-4o, claude-3-5-sonnet-latest
+    "NYXSTRIKE_LLM_URL":      "",                              # optional: custom OpenAI-compatible base URL only (OpenAI provider)
+    "NYXSTRIKE_LLM_API_KEY":  "",                               # or set GOOGLE_API_KEY / GEMINI_API_KEY (Gemini) in the environment
     "NYXSTRIKE_LLM_TIMEOUT":  600,                              # seconds
     "NYXSTRIKE_LLM_MAX_LOOPS": 9,
-    "NYXSTRIKE_LLM_THINK":    True,                             # Enable model thinking/reasoning (Ollama only, e.g. Qwen3)
-    "NYXSTRIKE_LLM_NUM_CTX":  4096,                             # Context window size for chat (Ollama only)
-    "NYXSTRIKE_LLM_NUM_CTX_ANALYSE": 16384,                     # Context window size for AI Analyse / AI Report (Ollama only)
+    "NYXSTRIKE_LLM_THINK":    False,                            # reserved (not used by Gemini path)
+    "NYXSTRIKE_LLM_NUM_CTX":  8192,                             # hints max output tokens for Gemini; context sizing for other paths
+    "NYXSTRIKE_LLM_NUM_CTX_ANALYSE": 16384,                     # analysis / report context hint
 
     # ── Chat widget ───────────────────────────────────────────────────────────
     "CHAT_PERSONALITY": "nyxstrike",  # active personality preset id (see server_core/intelligence/chat_personalities.py)

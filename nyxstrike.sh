@@ -6,9 +6,7 @@ set -euo pipefail
 # Usage:
 #   ./nyxstrike.sh                        # MCP launcher mode (default, used by 5ire)
 #   ./nyxstrike.sh -a                     # Update + start server  (recommended)
-#   ./nyxstrike.sh -a -ai                 # Same + AI model (~8.4 GB RAM)
-#   ./nyxstrike.sh -a -ai-small           # Same + smaller AI model (~2.5 GB RAM)
-#   ./nyxstrike.sh -a -ai-ollama-cloud    # Same + Ollama Cloud (gemma4:31b-cloud; needs OLLAMA_API_KEY)
+#   ./nyxstrike.sh -a -ai                 # Same + Gemini LLM defaults + warmup (needs GOOGLE_API_KEY or GEMINI_API_KEY)
 #
 #   ./nyxstrike.sh --server               # Start server only (no update/install)
 #   ./nyxstrike.sh --mcp                  # Start MCP client only
@@ -19,9 +17,7 @@ set -euo pipefail
 #   ./nyxstrike.sh -t -b                  # Install tools + heavy Python extras
 #   ./nyxstrike.sh -u                     # Update already-cloned git_tools
 #   ./nyxstrike.sh -y                     # Force reinstall Python requirements
-#   ./nyxstrike.sh -ai                    # Install Ollama + 9b model
-#   ./nyxstrike.sh -ai-ollama-cloud        # Config for Ollama Cloud (gemma4:31b-cloud) + OLLAMA_API_KEY
-#   ./nyxstrike.sh -ai-small              # Install Ollama + 4b model
+#   ./nyxstrike.sh -ai                    # Write Gemini defaults to config + enable LLM warmup
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${ROOT_DIR}/nyxstrike-env"
@@ -35,14 +31,8 @@ UPDATE_GIT_TOOLS=false
 UPDATE_SELF=false
 UPDATE_PYTHON_PACKAGES=false
 PIP_BOOTSTRAPPED=false
-INSTALL_AI_MODEL=false
-AI_SMALL_MODE=false
-AI_LARGE_MODE=false
-OLLAMA_CLOUD_CONFIG=false
-
-OLLAMA_MODEL_BASE="huihui_ai/gemma-4-abliterated:e4b"
-OLLAMA_MODEL_NAME="nyxstrike-ai"
-OLLAMA_MODELFILE=""
+CONFIGURE_GEMINI_LLM=false
+GEMINI_DEFAULT_MODEL="gemini-2.0-flash"
 
 # --- run flags ---
 RUN_SERVER=false
@@ -338,16 +328,16 @@ install_requirements_file() {
   touch "${stamp_file}"
 }
 
-write_model_to_config_local() {
-  local model="$1"
+write_gemini_llm_config_local() {
+  local model="${1:-${GEMINI_DEFAULT_MODEL}}"
   local data_dir="${NYXSTRIKE_DATA_DIR:-${ROOT_DIR}/.nyxstrike_data}"
   local config_file="${NYXSTRIKE_CONFIG_FILE:-${data_dir}/config/config_local.json}"
   local config_dir
   config_dir="$(dirname "${config_file}")"
 
   if ! command -v python3 >/dev/null 2>&1; then
-    echo "Warning: python3 not found; could not update config_local.json with model '${model}'."
-    echo "Set NYXSTRIKE_LLM_MODEL=${model} manually in ${config_file}."
+    echo "Warning: python3 not found; merge these into ${config_file} manually:"
+    echo '  NYXSTRIKE_LLM_PROVIDER=gemini, NYXSTRIKE_LLM_MODEL='"${model}"', NYXSTRIKE_LLM_URL=""'
     return
   fi
 
@@ -365,84 +355,14 @@ try:
     data = json.loads(existing_json)
 except Exception:
     data = {}
+data["NYXSTRIKE_LLM_PROVIDER"] = "gemini"
 data["NYXSTRIKE_LLM_MODEL"] = model
+data["NYXSTRIKE_LLM_URL"] = ""
 with open(config_file, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
 PYEOF
-}
-
-write_ollama_cloud_config_local() {
-  local model="${1:-qwen3.5:397b-cloud}"
-  local base_url="${2:-https://ollama.com}"
-  local data_dir="${NYXSTRIKE_DATA_DIR:-${ROOT_DIR}/.nyxstrike_data}"
-  local config_file="${NYXSTRIKE_CONFIG_FILE:-${data_dir}/config/config_local.json}"
-  local config_dir
-  config_dir="$(dirname "${config_file}")"
-
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "Warning: python3 not found; set NYXSTRIKE_LLM_MODEL, NYXSTRIKE_LLM_URL in ${config_file} manually."
-    return
-  fi
-
-  local existing="{}"
-  if [[ -f "${config_file}" ]]; then
-    existing="$(cat "${config_file}")"
-  else
-    mkdir -p "${config_dir}"
-  fi
-
-  python3 - "${config_file}" "${model}" "${base_url}" "${existing}" <<'PYEOF'
-import sys, json
-config_file, model, base_url, existing_json = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-try:
-    data = json.loads(existing_json)
-except Exception:
-    data = {}
-data["NYXSTRIKE_LLM_MODEL"] = model
-data["NYXSTRIKE_LLM_URL"] = base_url.rstrip("/")
-with open(config_file, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-PYEOF
-  echo "Ollama Cloud LLM configured: model=${model}, URL=${base_url}"
-  echo "Set your API key before starting the server, e.g.: export OLLAMA_API_KEY=\"<key from https://ollama.com/settings/keys >\""
-}
-
-install_ollama_model() {
-  if [[ "${INSTALL_AI_MODEL}" != true ]]; then
-    return
-  fi
-
-  if ! command -v ollama >/dev/null 2>&1; then
-    echo "Ollama not found. Installing via official install script..."
-    if ! curl -fsSL https://ollama.com/install.sh | sh; then
-      echo "Ollama install failed. Skipping AI model setup."
-      return
-    fi
-  fi
-
-  if ! ollama list 2>/dev/null | grep -qF "${OLLAMA_MODEL_BASE}"; then
-    echo "Pulling base model: ${OLLAMA_MODEL_BASE} (this may take a while)..."
-    if ! ollama pull "${OLLAMA_MODEL_BASE}"; then
-      echo "Failed to pull base model. Skipping AI model creation."
-      return
-    fi
-  fi
-
-  if [[ -n "${OLLAMA_MODELFILE}" && -f "${OLLAMA_MODELFILE}" ]]; then
-    if ollama list 2>/dev/null | grep -qF "${OLLAMA_MODEL_NAME}"; then
-      write_model_to_config_local "${OLLAMA_MODEL_NAME}"
-    else
-      echo "Creating custom model '${OLLAMA_MODEL_NAME}' from ${OLLAMA_MODELFILE}..."
-      if ! ollama create "${OLLAMA_MODEL_NAME}" -f "${OLLAMA_MODELFILE}"; then
-        echo "Failed to create custom model. Falling back to base model."
-        write_model_to_config_local "${OLLAMA_MODEL_BASE}"
-        return
-      fi
-      write_model_to_config_local "${OLLAMA_MODEL_NAME}"
-    fi
-  elif [[ "${AI_SMALL_MODE}" == true || "${AI_LARGE_MODE}" == true ]]; then
-    write_model_to_config_local "${OLLAMA_MODEL_BASE}"
-  fi
+  echo "Gemini LLM configured in ${config_file} (provider=gemini, model=${model})."
+  echo "Set an API key before starting the server, e.g.: export GOOGLE_API_KEY=\"<key from https://ai.google.dev/ >\""
 }
 
 clone_or_update_git_tools() {
@@ -516,12 +436,9 @@ run_setup() {
     echo "[4/4] Skipping git tool repositories (use -t to enable)."
   fi
 
-  if [[ "${OLLAMA_CLOUD_CONFIG}" == true ]]; then
-    echo "[5/5] Configuring Ollama Cloud LLM (no local model pull)..."
-    write_ollama_cloud_config_local "qwen3.5:397b-cloud" "https://ollama.com"
-  elif [[ "${INSTALL_AI_MODEL}" == true ]]; then
-    echo "[5/5] Setting up AI model..."
-    install_ollama_model
+  if [[ "${CONFIGURE_GEMINI_LLM}" == true ]]; then
+    echo "[5/5] Configuring Google Gemini LLM defaults..."
+    write_gemini_llm_config_local "${GEMINI_DEFAULT_MODEL}"
   fi
 
   echo "Setup complete."
@@ -571,25 +488,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -ai)
-      INSTALL_AI_MODEL=true
-      AI_LARGE_MODE=true
-      OLLAMA_MODEL_BASE="huihui_ai/gemma-4-abliterated:e4b"
-      OLLAMA_MODELFILE="${ROOT_DIR}/Modelfiles/Modelfile.gemma4-e4b"
-      export NYXSTRIKE_LLM_WARMUP=1
-      DO_SETUP=true
-      shift
-      ;;
-    -ai-ollama-cloud)
-      OLLAMA_CLOUD_CONFIG=true
-      export NYXSTRIKE_LLM_WARMUP=1
-      DO_SETUP=true
-      shift
-      ;;
-    -ai-small)
-      INSTALL_AI_MODEL=true
-      AI_SMALL_MODE=true
-      OLLAMA_MODEL_BASE="huihui_ai/qwen3.5-abliterated:2B"
-      OLLAMA_MODELFILE="${ROOT_DIR}/Modelfiles/Modelfile.qwen3-2b"
+      CONFIGURE_GEMINI_LLM=true
       export NYXSTRIKE_LLM_WARMUP=1
       DO_SETUP=true
       shift
@@ -621,9 +520,7 @@ while [[ $# -gt 0 ]]; do
       echo "  -u, --update-git-tools  Pull latest for already-cloned git_tools repos (implies -t)"
       echo "  -y, --update-python-packages  Force reinstall of Python requirements"
       echo "  -p, --python <bin>      Python binary to use (default: python3)"
-    echo "  -ai                     Install Ollama + pull 9b model (~8.4 GB RAM)"
-    echo "  -ai-ollama-cloud         Use Ollama Cloud (qwen3.5:397b-cloud; set OLLAMA_API_KEY)"
-    echo "  -ai-small               Install Ollama + pull 4b model (~2.5 GB RAM)"
+    echo "  -ai                     Configure Gemini (writes config_local.json; set GOOGLE_API_KEY or GEMINI_API_KEY)"
       echo ""
       echo "Run:"
       echo "  --server                Start the NyxStrike API server"
@@ -634,8 +531,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Examples:"
       echo "  ./nyxstrike.sh -a               # start here (first run + daily driver)"
-      echo "  ./nyxstrike.sh -a -ai-small     # with local AI model (low-spec)"
-    echo "  ./nyxstrike.sh -a -ai-ollama-cloud -t  # Ollama Cloud + tools (export OLLAMA_API_KEY first)"
+      echo "  ./nyxstrike.sh -a -ai           # with Gemini defaults + LLM warmup"
       echo "  ./nyxstrike.sh --server         # just start the server"
       exit 0
       ;;
