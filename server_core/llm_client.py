@@ -23,6 +23,7 @@ Config keys:
 import logging
 import json
 import os
+import time
 import uuid
 from typing import Any, Dict, Generator, List, Optional
 from urllib.parse import quote
@@ -160,6 +161,34 @@ class GeminiBackend:
     texts = [p["text"] for p in parts if "text" in p]
     return "".join(texts).strip()
 
+  @staticmethod
+  def _split_thought_and_answer(parts: List[Dict[str, Any]]) -> tuple[str, str]:
+    """Separate Gemini thought summaries from visible answer text."""
+    thought_chunks: List[str] = []
+    answer_chunks: List[str] = []
+    for p in parts:
+      if not isinstance(p, dict):
+        continue
+      txt = p.get("text")
+      if not txt:
+        continue
+      if p.get("thought"):
+        thought_chunks.append(txt)
+      else:
+        answer_chunks.append(txt)
+    return "".join(thought_chunks).strip(), "".join(answer_chunks).strip()
+
+  def _want_thoughts(self, think: Optional[bool]) -> bool:
+    if think is not None:
+      return bool(think)
+    v = (_cfg("NYXSTRIKE_LLM_THINK") or "").strip().lower()
+    return v in ("1", "true", "yes", "y")
+
+  def _apply_thinking_config(self, gen_cfg: Dict[str, Any], want: bool) -> None:
+    if not want:
+      return
+    gen_cfg["thinkingConfig"] = {"includeThoughts": True}
+
   def chat(
     self,
     messages: List[Dict[str, Any]],
@@ -169,12 +198,15 @@ class GeminiBackend:
     tools: Optional[List[Dict[str, Any]]] = None,
   ) -> Dict[str, Any]:
     sys_text, contents = self._build_contents(messages)
+    want_thoughts = self._want_thoughts(think)
+    gen_cfg: Dict[str, Any] = {
+      "temperature": 0.7,
+      "maxOutputTokens": self._max_output_tokens,
+    }
+    self._apply_thinking_config(gen_cfg, want_thoughts)
     body: Dict[str, Any] = {
       "contents": contents,
-      "generationConfig": {
-        "temperature": 0.7,
-        "maxOutputTokens": self._max_output_tokens,
-      },
+      "generationConfig": gen_cfg,
     }
     if sys_text:
       body["systemInstruction"] = {"parts": [{"text": sys_text}]}
@@ -190,8 +222,16 @@ class GeminiBackend:
         body["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
 
     url = self._endpoint("generateContent")
+
+    def _post(b: Dict[str, Any]) -> requests.Response:
+      return requests.post(url, json=b, timeout=self._timeout)
+
     try:
-      resp = requests.post(url, json=body, timeout=self._timeout)
+      resp = _post(body)
+      if resp.status_code == 400 and want_thoughts:
+        logger.info("gemini: generateContent failed with thoughts — retrying without thinkingConfig")
+        gen_cfg.pop("thinkingConfig", None)
+        resp = _post(body)
       resp.raise_for_status()
       data = resp.json()
     except requests.exceptions.Timeout:
@@ -207,24 +247,47 @@ class GeminiBackend:
       raise RuntimeError(f"Gemini returned no candidates: {err!r}")
 
     parts = ((cands[0].get("content") or {}).get("parts")) or []
-    text = self._extract_text(parts)
-    tool_calls = self._parse_tool_calls_from_parts(parts)
+    thought_text, answer_text = self._split_thought_and_answer(parts)
+    if not thought_text and not answer_text:
+      answer_text = self._extract_text(parts)
+    non_thought_parts = [p for p in parts if isinstance(p, dict) and not p.get("thought")]
+    tool_calls = self._parse_tool_calls_from_parts(non_thought_parts)
     tool_calls_norm = tool_calls if tool_calls else None
-    return {"content": text, "tool_calls": tool_calls_norm}
+    out: Dict[str, Any] = {"content": answer_text, "tool_calls": tool_calls_norm}
+    if thought_text:
+      out["thinking_content"] = thought_text
+    return out
 
   def stream_chat(self, messages: List[Dict[str, Any]], num_ctx: Optional[int] = None) -> Generator:
     sys_text, contents = self._build_contents(messages)
     mo = min(max((num_ctx or self._max_output_tokens), 256), 8192)
+    want_thoughts = self._want_thoughts(None)
+    gen_cfg: Dict[str, Any] = {"temperature": 0.7, "maxOutputTokens": mo}
+    self._apply_thinking_config(gen_cfg, want_thoughts)
     body: Dict[str, Any] = {
       "contents": contents,
-      "generationConfig": {"temperature": 0.7, "maxOutputTokens": mo},
+      "generationConfig": gen_cfg,
     }
     if sys_text:
       body["systemInstruction"] = {"parts": [{"text": sys_text}]}
 
     url = self._endpoint("streamGenerateContent") + "&alt=sse"
+
+    def _run_stream(b: Dict[str, Any]) -> tuple[requests.Response, float]:
+      t0 = time.perf_counter()
+      resp = requests.post(url, json=b, stream=True, timeout=self._timeout)
+      if resp.status_code == 400 and want_thoughts and b.get("generationConfig", {}).get("thinkingConfig"):
+        resp.close()
+        logger.info("gemini: streamGenerateContent failed with thoughts — retrying without thinkingConfig")
+        b = json.loads(json.dumps(b))
+        b["generationConfig"].pop("thinkingConfig", None)
+        t0 = time.perf_counter()
+        resp = requests.post(url, json=b, stream=True, timeout=self._timeout)
+      return resp, t0
+
     try:
-      with requests.post(url, json=body, stream=True, timeout=self._timeout) as resp:
+      resp, stream_t0 = _run_stream(body)
+      with resp:
         resp.raise_for_status()
         last_usage: Dict[str, Any] = {}
         for raw in resp.iter_lines(decode_unicode=True):
@@ -246,20 +309,26 @@ class GeminiBackend:
 
           for cand in data.get("candidates") or []:
             for part in (cand.get("content") or {}).get("parts") or []:
-              if "text" in part and part["text"]:
-                yield part["text"]
+              txt = part.get("text") if isinstance(part, dict) else None
+              if not txt:
+                continue
+              if part.get("thought"):
+                yield {"type": "thinking", "content": txt}
+              else:
+                yield txt
 
-        prompt = last_usage.get("promptTokenCount", 0)
-        total = last_usage.get("totalTokenCount", 0)
-        cand = total - prompt if total and prompt else 0
-        if last_usage:
-          yield {
-            "eval_count": cand,
-            "prompt_eval_count": prompt,
-            "total_duration_s": 0.0,
-            "eval_duration_s": 0.0,
-            "tokens_per_sec": 0.0,
-          }
+        elapsed = max(time.perf_counter() - stream_t0, 1e-9)
+        prompt = int(last_usage.get("promptTokenCount") or 0)
+        total = int(last_usage.get("totalTokenCount") or 0)
+        cand_tokens = max(total - prompt, 0) if total else int(last_usage.get("candidatesTokenCount") or 0)
+        tps = cand_tokens / elapsed if cand_tokens else 0.0
+        yield {
+          "eval_count": cand_tokens,
+          "prompt_eval_count": prompt,
+          "total_duration_s": round(elapsed, 3),
+          "eval_duration_s": round(elapsed, 3),
+          "tokens_per_sec": round(tps, 2),
+        }
     except requests.exceptions.Timeout:
       raise RuntimeError(f"Gemini stream timed out after {self._timeout}s")
     except requests.exceptions.HTTPError as exc:
@@ -274,12 +343,12 @@ class GeminiBackend:
       "preserving key facts, targets, commands, and findings. "
       "Be concise and technical.\n\n" + conversation
     )
-    r = self.chat([{"role": "user", "content": summary_prompt}])
+    r = self.chat([{"role": "user", "content": summary_prompt}], think=False)
     return (r.get("content") or "").strip() if isinstance(r, dict) else str(r)
 
   def warm_up(self) -> None:
     try:
-      self.chat([{"role": "user", "content": "Say OK"}])
+      self.chat([{"role": "user", "content": "Say OK"}], think=False)
     except Exception as exc:
       logger.warning("Gemini warm-up failed (non-fatal): %s", exc)
 

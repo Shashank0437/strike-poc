@@ -58,6 +58,15 @@ api_chat_bp = Blueprint("api_chat", __name__)
 _pending_tool_calls: Dict[str, Dict[str, Any]] = {}
 
 
+def _iter_sse_text_chunks(text: str, chunk_chars: int = 72):
+  """Slice assistant text into SSE payloads so the UI updates smoothly (tool-call path uses blocking chat)."""
+  if not text:
+    return
+  step = max(chunk_chars, 1)
+  for i in range(0, len(text), step):
+    yield text[i : i + step]
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _session_context_snippet(page: str, session_id: str) -> str:
@@ -276,6 +285,10 @@ def _stream_llm_with_tools(
       # result is a dict: {"content": str, "tool_calls": list|None}
       tool_calls = result.get("tool_calls") if isinstance(result, dict) else None
       content = result.get("content", "") if isinstance(result, dict) else str(result)
+      thinking_extra = (result.get("thinking_content") or "").strip() if isinstance(result, dict) else ""
+
+      if thinking_extra:
+        yield f"data: [THINK_TOKEN] {json.dumps(thinking_extra)}\n\n"
 
       if tool_calls:
         # Model wants to call a tool — pick the first call
@@ -315,7 +328,7 @@ def _stream_llm_with_tools(
 
       # Plain text response (no tool call, or unknown tool)
       if content:
-        for chunk in content:
+        for chunk in _iter_sse_text_chunks(content):
           full_response.append(chunk)
           yield f"data: {json.dumps(chunk)}\n\n"
         complete = "".join(full_response)
@@ -337,7 +350,7 @@ def _stream_llm_with_tools(
     yield "data: [THINKING]\n\n"
     for chunk in llm_client.stream_chat(llm_messages):
       if isinstance(chunk, dict):
-        # Optional reasoning token chunk (not emitted by Gemini path)
+        # Reasoning / thought-summary chunk (Gemini when NYXSTRIKE_LLM_THINK + thinking model)
         if chunk.get("type") == "thinking":
           yield f"data: [THINK_TOKEN] {json.dumps(chunk.get('content', ''))}\n\n"
           continue

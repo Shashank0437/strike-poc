@@ -41,7 +41,7 @@ _config = {
     "NYXSTRIKE_LLM_API_KEY":  "",                               # or set GOOGLE_API_KEY / GEMINI_API_KEY (Gemini) in the environment
     "NYXSTRIKE_LLM_TIMEOUT":  600,                              # seconds
     "NYXSTRIKE_LLM_MAX_LOOPS": 9,
-    "NYXSTRIKE_LLM_THINK":    False,                            # reserved (not used by Gemini path)
+    "NYXSTRIKE_LLM_THINK":    True,                             # Gemini: maps to thinkingConfig.includeThoughts (use a thinking-capable model, e.g. gemini-2.5-flash)
     "NYXSTRIKE_LLM_NUM_CTX":  8192,                             # hints max output tokens for Gemini; context sizing for other paths
     "NYXSTRIKE_LLM_NUM_CTX_ANALYSE": 16384,                     # analysis / report context hint
 
